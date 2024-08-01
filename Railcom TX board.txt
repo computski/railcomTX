@@ -1,0 +1,43 @@
+Based on PIC16F88
+
+Has onboard regulator and rectifier, can be fed with AC or DC or DCC
+
+Board is generic, provides a breakout for all the PIC pins, also an LED and resonator
+
+Has a programming header and also a servo control header block
+
+so as well as implementing a railcom transmitter it could be used as a DCC servo controller, lights controller
+or a generic PIC controller board
+
+And all for $4 US delivered. bargain.  its less faff than plugging all those wires into a breadboard.
+
+And it does not have a single via. wow.  the autoroute did most of the job.
+
+The board will fit into a 1551 Hammond case.
+
+To detect the uni-polar railcom cutout pulse, RB0/1 are used to monitor the XY legs via high value resistors.
+their ESP-diodes will provide a clamp to Vcc/Gnd.
+
+Jaycar sell the 88 chip for under five bucks
+
+
+
+As built
+R1  	10k sense res
+R2	10k sense res
+R3	22R
+R4	10k MCU drive
+R5	6k8
+R6	1k 
+
+C1	1uF
+C2	47uF
+U4	1nF
+
+D1-D4	1N4937 or use a bridge
+
+Q1,2	2N3904 NPN
+Q3,4	2N3906 PNP
+
+U2	78L05
+
