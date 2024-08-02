@@ -15,6 +15,18 @@ And there is also a 1uF cap on the 12v side into the regulator, but this will no
 
 First test is to apply a DCC signal with cutout and see what voltage droop results prior to even firing the Q1-4 transistor arrangement.
 
+Data is sent in two channels.  12 bits (2 bytes) in Ch1 and 36 bits 6 (bytes) in Ch2, where a byte is actually 6 bits.   Datagrams are never split over multiple RC responses.
+
+Decoders only respond when they see a packet addressed to them.  The Idle packet is a special case where the address is equivalent to 255.
+Decoders are not allowed to send feedback to other addresses or to service mode packages.
+
+Ch1 is used to echo the mobile decoder address for quick localisation.  e.g. transmit to loco 7003 and you expect to see 7003 come back in Ch1.
+Its not clear from the spec whether all decoders are to respond, or just the addressed decoder.  I think just the addressed one, else you'd have clashes.
+But this means railcom cannot dectect what locos are on the track unless it polled all possible addresses.  I think this is why railcomPlus was invented, but this is proprietary.
+
+I am interested in polling a loco and in setting and reading its CVs.
+
+
 
 
 
