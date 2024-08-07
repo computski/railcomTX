@@ -13,9 +13,9 @@
 //so stick to regular HV program mode.  Also Pickit4 does not seem to have a LV entry mode for this chip
 
 
-// CONFIG1
+// CONFIG1  RA6 is clkout
 
-#pragma config FOSC = INTOSCIO  // Oscillator Selection bits (INTRC oscillator; port I/O function on both RA6/OSC2/CLKO pin and RA7/OSC1/CLKI pin)
+#pragma config FOSC = INTOSCCLK //INTOSCIO  // Oscillator Selection bits (INTRC oscillator; port I/O function on both RA6/OSC2/CLKO pin and RA7/OSC1/CLKI pin)
 #pragma config WDTE = OFF       // Watchdog Timer Enable bit (WDT disabled)
 #pragma config PWRTE = OFF      // Power-up Timer Enable bit (PWRT disabled)
 #pragma config MCLRE = OFF      // RA5/MCLR/VPP Pin Function Select bit (RA5/MCLR/VPP pin function is MCLR)
@@ -134,19 +134,23 @@ void main(void) {
     TRISB4=0;
     TRISB5=0;  //TX output
     TRISA0=0;  //debug output
+    TRISA6=0;
+    
     
   //Timer 0
     OPTION_REGbits.T0CS=0;
-    TMR0IE=0; //do not enable T0 ints
     PSA=0;  //1=PSA to WDT, 0 = PSA to TMR0 giving div2
-
+    OPTION_REGbits.PS=0b000; //prescaler to generate 1uS
+    TMR0IE=0; //do not enable T0 ints
+   
 //timer 1. Boot default is instruction clock, no prescale
     TMR1CS=0;
-    TMR1ON=1;
-    TMR1IE=1;
-    PEIE=1; //peripheral ints
+    TMR1ON=0;
+    TMR1IE=0;
+    PEIE=0; //peripheral ints
 
 
+    
     
     //page 157
     TXEN = 1;
@@ -163,7 +167,6 @@ void main(void) {
    
     //INT config
     //boot, looking for a rising edge
-    
     INTEDG = 1;
     INT0IE=1;
     
@@ -176,14 +179,12 @@ void main(void) {
          
     
     while (1){
-    //__delay_ms(500);
-    //sPORTB.LED =! sPORTB.LED;
-    //PORTB=sPORTB.port;
+    __delay_ms(500);
+    sPORTB.LED =! sPORTB.LED;
+    PORTB=sPORTB.port;
     NOP();
     
     //to detect 
-    
-    
     
     
     
@@ -199,10 +200,27 @@ void main(void) {
 //8MHz with 0.5uS instr clock, count 256 is 128uS
 //RBIE monitors PORTB<7:4> for a change, read the port to clear it. note that read-modify-write will clear it.
 
+//disabled TMR1, and now TMR0 transition is 7.2mS but that's way slow compared to the
+//expected 50uS.   if I don't reset TMR0, I see 32mS.  
+
+
 void __interrupt() ISR(){
   if (TMR0IF){
- TMR0IF=0;
- return;
+       TMR0IF=0;
+       
+      if (INT0IE==1) return;  //timeout whilst looking for edge, ignore this
+
+     //is this a ch1, ch2 or end timeout?  
+      //for now just take RB0 low again at the timeout
+        sPORTA.RA0=0;
+        PORTA=sPORTA.port;
+        //clear any pending edge int, and look for rising edge
+        INT0IF=0;
+        INTEDG=1;
+        INT0IE=1;
+        TMR0IE=0;
+  }    
+      /*
       switch(deviceState){
           case S_CUTOUT_START:
               //we hit timeout, its not an RC cutout
@@ -233,9 +251,11 @@ void __interrupt() ISR(){
               TMR0IE=0;
               
       }
-      
       TMR0IF=0;
-  }
+  
+       }
+       */
+  
   
   if (TMR1IF){
             TMR1IF=0;
@@ -253,7 +273,43 @@ void __interrupt() ISR(){
   //mind you, a 1-bit half is 57uS so we might see falling from this before our T0 timeout.  so better we check the T0 value at this point
   //as we were gunning for 80uS
   
+  
+  //hmm. the routines are slow, e.g. RA0=1 is not asserted until 37uS after the edge falls.
+  //so we are better off using fixed __delay_ms() within the Ch1, 2 calls and do this from within the INT
+  
+  
   if (INT0IF){
+      if (INTEDG){
+          //saw rising edge         
+           sPORTA.RA0=0;
+           PORTA=sPORTA.port;
+           TMR0IE=0;  //don't enable TMR0 int yet
+           
+      }else{
+          //saw falling edge
+           if ((PORTB & 0b11)==0){
+               //was an RC cutout, leave INTEG=0 as a signal to TMR0 routine
+              sPORTA.RA0=1;
+              PORTA=sPORTA.port;
+             INT0IE=0; //stop looking for edges
+             
+              TMR0=255-T_TS1+T_CS+10;  //queue up CH1 transmission, 10 adjusts for INT execution delay
+             TMR0IF=0;
+             
+             TMR0IE=1;  //use TMR0 to trigger Ch1 transmission
+           
+           }else{
+           //not an RC cutout
+           TMR0IE=0;
+          }
+           
+      }
+      //clear int, and reverse edge we seek
+      INTEDG = ~INTEDG;
+      INT0IF=0;
+     
+      
+      /*
       switch(deviceState){
           case S_DCC_BIT:
               //set timer for T_CS with 5uS overhead
@@ -284,8 +340,9 @@ void __interrupt() ISR(){
                 PORTA=sPORTA.port;  //takes 33uS to execute this post the falling edge
              
       } 
-
       INT0IF=0;
+*/
+
       
   }
   
