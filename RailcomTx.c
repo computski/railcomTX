@@ -37,6 +37,22 @@
 #include<pic16f88.h>
 #define _XTAL_FREQ    8000000
 
+//uS time points through the cutout
+#define T_CS    32U
+#define T_TS1   80U
+#define T_TS2   193U
+#define T_CE    455U
+
+
+enum states{
+    S_DCC_BIT,
+    S_CUTOUT_START,
+    S_CHANNEL1,
+    S_CHANNEL2,
+   
+};
+
+uint8_t deviceState = S_DCC_BIT;
 
 /*
  * 8MHz internal osc
@@ -55,8 +71,8 @@
 volatile union {
 uint8_t                 port;
 struct {
-                unsigned             RA0  :1;              //RA0            
-                unsigned             RA1   :1;             //RA1             
+                unsigned             RA0  :1;              //RA0 output test point            
+                unsigned             RA1   :1;             //RA1 output test point            
 				unsigned			 RA2   :1;
                 unsigned			 RA3   :1;
                 unsigned             RA4  	:1;                        
@@ -82,8 +98,31 @@ struct {
                 };
 } sPORTB;
 
+//hardware ERROR!  only RB4-7 support IOC.  grr.  So I will need to use PGC and PGD, but this in turn means I cannot debug the thing using pickit
+//TX is locked to RB4.  Bummer.
+//Solution: Use INT instead, this is RB0.  Can set it as neg edge triggered and then sample for both RB0,1 being at zero
+
+//but TWO issues with this.  first we might see what is the front edge of the RC preamble because the 'sense' of the signal is inverted
+//second is the waveform takes a long time to decay to zero so we won't see both at zero for quite some time.
+
+//sense A
+//X is falling (X is blue). This is the falling edge of the prior bit, and now the Y line is rising at the start of the RC-flag bit
+//we won't see another falling edge until the end of the RC cutout, or possibly one DCC half bit later
+//
 
 
+//sense B
+//X is falling (X is red))
+//This is the falling edge end of the RC-flag bit.  We won't see another falling edge until the bit stream returns.
+
+
+//so this is a bit like DCC decoding off INT.  that works because the signal is symetric so you don't care whether you are on X or Y
+//with RC you do care, because its asymetric.  the RC pulse might be rising edge on X followed 20uS later by falling edge.
+//or it might not be present at all because if its on Y, INT won't see it.  INT sees a falling edge and then nothing more, it stays low.
+
+
+
+volatile    uint8_t bothLow;
 
 
 
@@ -91,13 +130,23 @@ struct {
 void main(void) {
     OSCCONbits.IRCF=0b111;  //8MHz
     ANSEL=0;
+    PORTA=sPORTA.port;
     TRISB4=0;
     TRISB5=0;  //TX output
+    TRISA0=0;  //debug output
     
   //Timer 0
     OPTION_REGbits.T0CS=0;
-    TMR0IE=1;
-    PSA=1;  //1=PSA to WDT
+    TMR0IE=0; //do not enable T0 ints
+    PSA=0;  //1=PSA to WDT, 0 = PSA to TMR0 giving div2
+
+//timer 1. Boot default is instruction clock, no prescale
+    TMR1CS=0;
+    TMR1ON=1;
+    TMR1IE=1;
+    PEIE=1; //peripheral ints
+
+
     
     //page 157
     TXEN = 1;
@@ -109,8 +158,15 @@ void main(void) {
     SPBRG=1;
   
     //WPU and IOC
-    nRBPU=1;
-    RBIE=1;
+//    nRBPU=1;
+ //   RBIE=1;
+   
+    //INT config
+    //boot, looking for a rising edge
+    
+    INTEDG = 1;
+    INT0IE=1;
+    
     
     ei();
     //OPTION_REGbits.
@@ -120,9 +176,17 @@ void main(void) {
          
     
     while (1){
-    __delay_ms(500);
-    sPORTB.LED =! sPORTB.LED;
-    PORTB=sPORTB.port;
+    //__delay_ms(500);
+    //sPORTB.LED =! sPORTB.LED;
+    //PORTB=sPORTB.port;
+    NOP();
+    
+    //to detect 
+    
+    
+    
+    
+    
     }
     
     
@@ -137,10 +201,100 @@ void main(void) {
 
 void __interrupt() ISR(){
   if (TMR0IF){
-  TMR0IF=0;
+ TMR0IF=0;
+ return;
+      switch(deviceState){
+          case S_CUTOUT_START:
+              //we hit timeout, its not an RC cutout
+              deviceState=S_DCC_BIT;
+              //Disable timer0 and look for a rising edge
+              TMR0IE=0;
+              INTEDG=1;
+              INTE=1;
+              break;
+          
+          case S_CHANNEL1:
+              //send Ch1 bits, set timer to trigger at start of Ch2
+              TMR0=255U-T_TS2-T_TS1;
+              deviceState=S_CHANNEL2;
+              break;
+              
+          case S_CHANNEL2:
+              //send Ch2 bits, set timer to look for end of RC
+              TMR0=255U-T_CE-T_TS2;
+              deviceState=S_DCC_BIT;
+              break; 
+              
+          case S_DCC_BIT:
+              //have reached end of cutout
+              //look for rising edge again
+              INTEDG=1;
+              INTE=1;
+              TMR0IE=0;
+              
+      }
+      
+      TMR0IF=0;
   }
+  
+  if (TMR1IF){
+            TMR1IF=0;
+    sPORTB.LED =! sPORTB.LED;
+        PORTB=sPORTB.port;
+        TMR1H=0x01;
+        TMR1L=0;
+  }
+  
+  
+  //using a state engine is relatively slow. would be faster to test whether we are looking for rising/falling edge
+  //and if falling we know this is the start of the rc cutout
+  //and on rising, we can set T0= ch1 transmit point.  then we either see falling and test ok on XY and allow T0 to trigger the ch1
+  //else we don't see falling at the point we hit T0 and this resets
+  //mind you, a 1-bit half is 57uS so we might see falling from this before our T0 timeout.  so better we check the T0 value at this point
+  //as we were gunning for 80uS
+  
+  if (INT0IF){
+      switch(deviceState){
+          case S_DCC_BIT:
+              //set timer for T_CS with 5uS overhead
+              TMR0=255-T_CS+5;
+             //found rising edge, look for falling
+              INTEDG=0;
+              sPORTA.RA0=0;
+              PORTA=sPORTA.port;
+              deviceState=S_CUTOUT_START;
+              TMR0IE=1;
+              break;
+          case S_CUTOUT_START:
+              //found falling edge, assume both X&Y are low
+              if ((PORTB & 0b11)==0){
+                  sPORTA.RA0=1;
+                  TMR0=255-T_TS1-T_CS-5;
+                  //deviceState=S_CHANNEL1; //queue up ch1
+                   deviceState=S_DCC_BIT; //debug
+                  INTEDG=1; //debug, else 0
+              }else{
+                  //not an RC cutout
+                  sPORTA.RA0=0;
+                  INTEDG=1;  //default to looking for rising edge              
+                    INTE=1;
+                     deviceState=S_DCC_BIT; 
+              }
+              
+                PORTA=sPORTA.port;  //takes 33uS to execute this post the falling edge
+             
+      } 
+
+      INT0IF=0;
+      
+  }
+  
+  
+  
   if (RBIF){
-      uint8_t x = PORTB; //read port b to clear the int condition
+    
+      
+      
       RBIF=0;
   }
 }
