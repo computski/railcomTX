@@ -1,5 +1,6 @@
 2024-10-10
 Reprise the transmitter.   Now I have linked RB7 to RB1 we can detect both senses, however the LED output on RB4 is a problem because our driving it will clear the IOC detect.
+RB7-4 have IOC.  
 
 ignoring the LED for a moment.We can look for IOC on either RB0/1.  if we see this, are we now looking at 'both high'.  If so this means we have just seen the edge ofa RC marker.
 The spec says the RC mark is asserted for Tcs=32uS max.  after which both X-Y appear to go high because they are clamped to gnd by control.and the WPUs on the MCU take over.  i.e. these are real edges.
