@@ -1,0 +1,16 @@
+2024-10-10
+Reprise the transmitter.   Now I have linked RB7 to RB1 we can detect both senses, however the LED output on RB4 is a problem because our driving it will clear the IOC detect.
+
+ignoring the LED for a moment.We can look for IOC on either RB0/1.  if we see this, are we now looking at 'both high'.  If so this means we have just seen the edge ofa RC marker.
+The spec says the RC mark is asserted for Tcs=32uS max.  after which both X-Y appear to go high because they are clamped to gnd by control.and the WPUs on the MCU take over.  i.e. these are real edges.
+so if RB0/1 sees an edge, then we sample again 32uS later and expect both lines to be high.  If we capture which line saw a high prior to this, then we know if it was X or Y that was the rc mark.
+
+current software .  INT looks for a falling edge. if it sees one, it then looks for both-low on RB0,1At this point, the controller has tied X-T together.  This results in the board ground being tied to RB0,1, via bias resistors, and so both will see logic 0.
+If you want to know whether you have an X or Y rc-marker, you need to capture what the transition was on the prior IOC for RB0,1 bearing in mindthey might not both transition at the same time.   given the two transitions should only be a few nS apart, its ok to trigger on one, and then sample both lines as their final states a couple of insr later.  eg if X has reached state 1 then it was an X mark, else a Y mark.
+Note WPU will lift both RB0,1 high if we have open circuit (no power from controller, not asserting rc cutout) and this is to be ignored.  In my controller, this is never going to be the case with an LMD as we are either driving bipolar or driving both to gnd as both RC cutout or power-off.
+ok so with both low we know we are in an RC cutout.  We can wait a fixed delay and assert the payload.  we can assert an X or a Y payload.
+
+There is no need to use INT, instead we will use IOC on RB0-3
+
+Pesky LED.  If we assert a new LED state then we reset the IOC and we can miss edges.  The only way to ensure the LED transition is at a non critical time, is to assert it immediately after you decided you did NOT see an RC bit.  IOC detected the edge, so you have the entire bit half-period to assert the new LED state before you need to be looking for another edge. 
+We can do this with an LED request flag.  It also means that if we don't detect edges then we do not toggle the LED.  i.e. if no DCC signal is present, the LED does not toggle.
