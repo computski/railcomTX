@@ -3,6 +3,18 @@
  * Author: julian
  *
  * Created on 24 June 2024, 10:05 PM
+ * 2024-10-10 re-write to cope with dual polarity RC flags
+ * RB0 supports INT on X
+ * RB1 is wired to Y (no IOC) but also to RB7 which does generate IOC
+ * we now need to look for a negative edge on either, and if immediately after this
+ * both RB0,1 are zero then we are in the RC cutout.
+ * If we are NOT in the RC cutout then we can gate the LED for a change, because this is on RB4
+ * and writing to it will clear any pending IOC
+ * 
+ * 2024-10-18 EDGES.  Note that INT on any edge followed by both-hi will detect either polarity
+ * same is true for IOC
+ * And in fact all we need is INT, because depending on the edge seen, we can discriminate polarity
+ * 
  */
 
 //go to Production... set configuration bits.. Generate Source Code to Output and paste here
@@ -35,6 +47,7 @@
 
 #include <xc.h>
 #include<pic16f88.h>
+#include<stdbool.h>
 #define _XTAL_FREQ    8000000
 
 //uS time points through the cutout
@@ -53,6 +66,11 @@ enum states{
 };
 
 uint8_t deviceState = S_DCC_BIT;
+volatile bool rcActive;
+volatile bool IOClastState;  //
+
+
+
 
 /*
  * 8MHz internal osc
@@ -121,12 +139,6 @@ struct {
 //or it might not be present at all because if its on Y, INT won't see it.  INT sees a falling edge and then nothing more, it stays low.
 
 
-
-volatile    uint8_t bothLow;
-
-
-
-
 void main(void) {
     OSCCONbits.IRCF=0b111;  //8MHz
     ANSEL=0;
@@ -152,7 +164,7 @@ void main(void) {
 
     
     
-    //page 157
+    //page 99 of PIC16F88 spec
     TXEN = 1;
     SYNC = 0;
     SPEN = 1;
@@ -162,14 +174,13 @@ void main(void) {
     SPBRG=1;
   
     //WPU and IOC
-//    nRBPU=1;
- //   RBIE=1;
-   
-    //INT config
-    //boot, looking for a rising edge
-    INTEDG = 1;
-    INT0IE=1;
+    nRBPU=1;
+    RBIE=0;  //2024-10-18 do not enable IOC
     
+    //INT config look for falling edge
+    INTEDG = 0;
+    INT0IE=1;
+    rcActive=false;    
     
     ei();
     //OPTION_REGbits.
@@ -181,7 +192,9 @@ void main(void) {
     while (1){
     __delay_ms(500);
     sPORTB.LED =! sPORTB.LED;
-    PORTB=sPORTB.port;
+    
+    //port writing is handled in the INT routine
+    //PORTB=sPORTB.port;
     NOP();
     
     //to detect 
@@ -207,59 +220,16 @@ void main(void) {
 void __interrupt() ISR(){
   if (TMR0IF){
        TMR0IF=0;
-       
-      if (INT0IE==1) return;  //timeout whilst looking for edge, ignore this
-
-     //is this a ch1, ch2 or end timeout?  
-      //for now just take RB0 low again at the timeout
-        sPORTA.RA0=0;
-        PORTA=sPORTA.port;
-        //clear any pending edge int, and look for rising edge
-        INT0IF=0;
-        INTEDG=1;
-        INT0IE=1;
-        TMR0IE=0;
+       return;
+       //we will use a fixed delay and not bother with TMR0  
   }    
-      /*
-      switch(deviceState){
-          case S_CUTOUT_START:
-              //we hit timeout, its not an RC cutout
-              deviceState=S_DCC_BIT;
-              //Disable timer0 and look for a rising edge
-              TMR0IE=0;
-              INTEDG=1;
-              INTE=1;
-              break;
-          
-          case S_CHANNEL1:
-              //send Ch1 bits, set timer to trigger at start of Ch2
-              TMR0=255U-T_TS2-T_TS1;
-              deviceState=S_CHANNEL2;
-              break;
-              
-          case S_CHANNEL2:
-              //send Ch2 bits, set timer to look for end of RC
-              TMR0=255U-T_CE-T_TS2;
-              deviceState=S_DCC_BIT;
-              break; 
-              
-          case S_DCC_BIT:
-              //have reached end of cutout
-              //look for rising edge again
-              INTEDG=1;
-              INTE=1;
-              TMR0IE=0;
-              
-      }
-      TMR0IF=0;
-  
-       }
-       */
-  
+     
   
   if (TMR1IF){
-            TMR1IF=0;
-    sPORTB.LED =! sPORTB.LED;
+           TMR1IF=0;
+           return;
+           //code below not used
+           sPORTB.LED =! sPORTB.LED;
         PORTB=sPORTB.port;
         TMR1H=0x01;
         TMR1L=0;
@@ -279,79 +249,147 @@ void __interrupt() ISR(){
   
   
   if (INT0IF){
+      
+#ifdef not_using_this
       if (INTEDG){
-          //saw rising edge         
-           sPORTA.RA0=0;
-           PORTA=sPORTA.port;
-           TMR0IE=0;  //don't enable TMR0 int yet
-           
-      }else{
-          //saw falling edge
+          //saw falling edge,         
            if ((PORTB & 0b11)==0){
                //was an RC cutout, leave INTEG=0 as a signal to TMR0 routine
+               rcActive=true;
               sPORTA.RA0=1;
               PORTA=sPORTA.port;
              INT0IE=0; //stop looking for edges
              
-              TMR0=255-T_TS1+T_CS+10;  //queue up CH1 transmission, 10 adjusts for INT execution delay
-             TMR0IF=0;
+             // TMR0=255-T_TS1+T_CS+10;  //queue up CH1 transmission, 10 adjusts for INT execution delay
+             //TMR0IF=0;
              
-             TMR0IE=1;  //use TMR0 to trigger Ch1 transmission
+             //TMR0IE=1;  //use TMR0 to trigger Ch1 transmission
            
+            
+             
+             __delay_us(30);
+             //transmit Ch1 stuff 80uS after the entry edge
+          //sending 0xAC 0x95 is 19 in the symbol table
+             TXEN=1;  //send transmission
+              TXREG=0xAC;  //with this data
+              
+              //wait for transmission to complete
+              while (TRMT==0){NOP();}
+              TXEN=1;  //send transmission
+              TXREG=0x95;  //with this data
+              
+              
+              
+                 //now exit
+              sPORTA.RA0=0;
+              PORTA=sPORTA.port;
+             INT0IE=1; //start looking for edges
+             
            }else{
-           //not an RC cutout
-           TMR0IE=0;
+           //not an RC cutout, can assert port B to write to LED
+               PORTB = sPORTB.port;
+          
           }
            
       }
-      //clear int, and reverse edge we seek
-      INTEDG = ~INTEDG;
-      INT0IF=0;
-     
+      //clear int
+      INT0IF=0;     
+#endif
       
-      /*
-      switch(deviceState){
-          case S_DCC_BIT:
-              //set timer for T_CS with 5uS overhead
-              TMR0=255-T_CS+5;
-             //found rising edge, look for falling
-              INTEDG=0;
+      //2024-10-18 new block. Bug we don't see both high after a rising edge.
+      //we probably need to add a small delay, i.e. sample 20uS after we see an edge
+    __delay_us(10);
+      //hmm this seems to garble the transmissions and it does not help on reverse polarity
+      
+      
+      //if both low, we are in an RC cutout
+       if ((PORTB & 0b11)==0){
+              rcActive=true;
+              sPORTA.RA0=1;
+              PORTA=sPORTA.port;
+             INT0IE=0; //stop looking for edges
+          
+             //but was it a rising or a falling edge?
+             
+             if (INTEDG){
+             //rising
+              __delay_us(30);
+             TXEN=1;  //send transmission
+              TXREG=0xC3;  //with this data
+              
+              //wait for transmission to complete
+              while (TRMT==0){NOP();}
+              TXEN=1;  //send transmission
+              TXREG=0x96;  //with this data
+       
+             }else{
+                 //falling
+                 __delay_us(30);
+                TXEN=1;  //send transmission
+                TXREG=0xAC;  //with this data
+              
+                //wait for transmission to complete
+                while (TRMT==0){NOP();}
+                TXEN=1;  //send transmission
+                TXREG=0x95;  //with this data
+                }
+             
+            //now exit transmission
               sPORTA.RA0=0;
               PORTA=sPORTA.port;
-              deviceState=S_CUTOUT_START;
-              TMR0IE=1;
-              break;
-          case S_CUTOUT_START:
-              //found falling edge, assume both X&Y are low
-              if ((PORTB & 0b11)==0){
-                  sPORTA.RA0=1;
-                  TMR0=255-T_TS1-T_CS-5;
-                  //deviceState=S_CHANNEL1; //queue up ch1
-                   deviceState=S_DCC_BIT; //debug
-                  INTEDG=1; //debug, else 0
-              }else{
-                  //not an RC cutout
-                  sPORTA.RA0=0;
-                  INTEDG=1;  //default to looking for rising edge              
-                    INTE=1;
-                     deviceState=S_DCC_BIT; 
-              }
-              
-                PORTA=sPORTA.port;  //takes 33uS to execute this post the falling edge
+             INT0IE=1; //start looking for edges
              
-      } 
-      INT0IF=0;
-*/
-
+           }else{
+           //not an RC cutout, can assert port B to write to LED
+               PORTB = sPORTB.port;
+          }
+      
+      //in all cases, invert edge we seek, and clear int
+      INTEDG=~INTEDG;
+      INT0IF=0;   
       
   }
   
   
-  
+  //2024-10-8 we don't use TMR0 we look for a rising then falling edge and if, just after the falling edge
+  //both RB0,1 are high, this indicates an RC cutout.  A powered-half-bit will not have both high.
   if (RBIF){
-    
-      
-      
+            
+ 
+     if (RB7==0){
+            #ifdef not_using_this  
+           //saw falling edge, but is this a RC cutout?
+            if ((PORTB & 0b11)==0){
+               //was an RC cutout
+              sPORTA.RA0=1;
+              PORTA=sPORTA.port;
+              RBIE=0;  //stop looking for edges
+              rcActive=true;
+              
+             __delay_us(30);
+             //transmit Ch1 stuff 80uS after the entry edge
+          //sending 0xAC 0x95 is 19 in the symbol table
+             TXEN=1;  //send transmission
+              TXREG=0xAB;  //with this data
+              
+              //wait for transmission to complete
+              while (TRMT==0){NOP();}
+              TXEN=1;  //send transmission
+              TXREG=0x96;  //with this data
+              
+              //now exit
+              sPORTA.RA0=0;
+              PORTA=sPORTA.port;
+             RBIE=1; //start looking for edges
+             
+           }else{
+            //not an RC cutout, assert port B
+            PORTB=sPORTB.port;
+            
+          }
+    #endif     
+      } 
+
       RBIF=0;
   }
 }
